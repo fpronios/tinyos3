@@ -28,6 +28,9 @@ typedef enum pid_state_e {
   ZOMBIE  /**< The PID is held by a zombie */
 } pid_state;
 
+/** Joined State*/
+
+
 /**
   @brief Process Control Block.
 
@@ -35,6 +38,8 @@ typedef enum pid_state_e {
  */
 typedef struct process_control_block {
   pid_state  pstate;      /**< The pid state for this PCB */
+
+  rlnode mtcb_list;
 
   PCB* parent;            /**< Parent's pcb. */
   int exitval;            /**< The exit value */
@@ -87,5 +92,9 @@ PCB* get_pcb(Pid_t pid);
   @returns the PID of the process, or NOPROC.
 */
 Pid_t get_pid(PCB* pcb);
+
+//void start_main_thread();
+
+
 
 #endif

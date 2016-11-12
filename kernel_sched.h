@@ -62,6 +62,33 @@ typedef enum {
   NORMAL_THREAD   /**< Marks a normal thread */
 } Thread_type;
 
+typedef enum {
+  JOINABLE,
+  JOINED,
+  DETACHED
+} Thread_join_state;
+
+typedef enum
+{
+  INTERRUPTED,
+  NOT_INTERRUPTED
+} Thread_interrupt; 
+
+/** The multi thread control block*/
+typedef struct multi_thread_control_block{
+
+PCB* owner_pcb;       /**< This is null for a free TCB */
+TCB* handled_tcb;
+Pid_t pid;
+Thread_interrupt t_interrupt;
+Thread_join_state join_state;
+
+
+int argl;               
+void* args; 
+
+}MTCB;
+
 /**
   @brief The thread control block
 
@@ -71,8 +98,12 @@ typedef enum {
 typedef struct thread_control_block
 {
   PCB* owner_pcb;       /**< This is null for a free TCB */
+  MTCB* mtcb_handler;
 
   ucontext_t context;     /**< The thread context */
+
+  unsigned int current_priority;
+  unsigned int initial_priority;
 
 #ifndef NVALGRIND
   unsigned valgrind_stack_id; /**< This is useful in order to register the thread stack to valgrind */
@@ -153,7 +184,7 @@ extern CCB cctx[MAX_CORES];
   Note that, the new thread is returned in the @c INIT state.
   The caller must use @c wakeup() to start it.
 */
-TCB* spawn_thread(PCB* pcb, void (*func)());
+TCB* spawn_thread(MTCB* mtcb, PCB* pcb, void (*func)());
 
 /**
   @brief Wakeup a blocked thread.
@@ -196,6 +227,18 @@ void sleep_releasing(Thread_state newstate, Mutex* mx);
   it will renew the quantum for the current thread.
  */
 void yield(void);
+
+
+/*
+*
+* Function to find the queue to find the queue with the highest priority which is not empty. 
+* 
+*/
+unsigned int sched_max_available();
+
+
+void MFQ_state();
+
 
 /**
   @brief Enter the scheduler.

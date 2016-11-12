@@ -7,6 +7,7 @@
 #include "kernel_sched.h"
 #include "kernel_proc.h"
 
+
 #ifndef NVALGRIND
 #include <valgrind/valgrind.h>
 #endif
@@ -46,6 +47,17 @@
  */
 volatile unsigned int active_threads = 0;
 Mutex active_threads_spinlock = MUTEX_INIT;
+
+#define ANSI_COLOR_RED     "\x1b[31m"
+#define ANSI_COLOR_GREEN   "\x1b[32m"
+#define ANSI_COLOR_YELLOW  "\x1b[33m"
+#define ANSI_COLOR_BLUE    "\x1b[34m"
+#define ANSI_COLOR_MAGENTA "\x1b[35m"
+#define ANSI_COLOR_CYAN    "\x1b[36m"
+#define ANSI_COLOR_RESET   "\x1b[0m"
+
+#define MFQ_SHOW 0
+
 
 /* This is specific to Intel Pentium! */
 #define SYSTEM_PAGE_SIZE  (1<<12)
@@ -137,14 +149,15 @@ static void thread_start()
   Initialize and return a new TCB
 */
 
-TCB* spawn_thread(PCB* pcb, void (*func)())
+TCB* spawn_thread(MTCB* mtcb, PCB* pcb, void (*func)())
 {
+
   /* The allocated thread size must be a multiple of page size */
   TCB* tcb = (TCB*) allocate_thread(THREAD_SIZE);
 
   /* Set the owner */
   tcb->owner_pcb = pcb;
-
+  tcb->mtcb_handler = mtcb;
   /* Initialize the other attributes */
   tcb->type = NORMAL_THREAD;
   tcb->state = INIT;
@@ -178,6 +191,8 @@ TCB* spawn_thread(PCB* pcb, void (*func)())
   active_threads++;
   Mutex_Unlock(&active_threads_spinlock);
  
+
+
   return tcb;
 }
 
@@ -249,6 +264,7 @@ void ici_handler()
 */
 void sched_queue_add(TCB* tcb)
 {
+
   /* Insert at the end of the scheduling list */
   Mutex_Lock(& sched_spinlock);
   rlist_push_back(&scheduler_table[tcb->current_priority], & tcb->sched_node);
@@ -278,6 +294,7 @@ TCB* sched_queue_select()
 unsigned int sched_max_available()
 {
   
+  
   for(unsigned int i = MAX_PRIORITY_LEVEL; i>0; i--)
   {
     //puts("before if");
@@ -288,6 +305,27 @@ unsigned int sched_max_available()
   }
   //puts("before return 0");
   return 0;
+}
+
+
+void MFQ_state(){
+if(MFQ_SHOW){
+  fprintf(stderr, ANSI_COLOR_MAGENTA "+---------------+------------------+\n"ANSI_COLOR_RESET);
+  fprintf(stderr, ANSI_COLOR_MAGENTA "|"ANSI_COLOR_YELLOW "Priority Level "ANSI_COLOR_MAGENTA"|" ANSI_COLOR_RESET ANSI_COLOR_YELLOW" Threads in Queue " ANSI_COLOR_MAGENTA"|\n"ANSI_COLOR_RESET);
+  fprintf(stderr, ANSI_COLOR_MAGENTA "+---------------+------------------+\n"ANSI_COLOR_RESET);
+
+  /**A loop to present the current state of the ml feedback queue*/
+  for(unsigned int i = MAX_PRIORITY_LEVEL; i>0; i--){
+  
+  if(rlist_len(&scheduler_table[i-1])>0){
+      fprintf(stderr,ANSI_COLOR_MAGENTA "|"ANSI_COLOR_RESET  ANSI_COLOR_RED "      %2d       "ANSI_COLOR_MAGENTA ANSI_COLOR_RESET"|"ANSI_COLOR_RED"       [%2d]       " ANSI_COLOR_MAGENTA"|\n"ANSI_COLOR_RESET, i,rlist_len(&scheduler_table[i-1]));
+
+  }else{
+    fprintf(stderr,ANSI_COLOR_MAGENTA "|" ANSI_COLOR_RESET ANSI_COLOR_YELLOW "      %2d       "ANSI_COLOR_MAGENTA ANSI_COLOR_RESET"|"ANSI_COLOR_YELLOW"       [%2d]       " ANSI_COLOR_MAGENTA"|\n"ANSI_COLOR_RESET, i,rlist_len(&scheduler_table[i-1]));
+  }
+}
+fprintf(stderr, ANSI_COLOR_MAGENTA"+---------------+------------------+\n"ANSI_COLOR_RESET);
+}
 }
 
 /*
@@ -410,7 +448,11 @@ void yield()
   /* This is where we get after we are switched back on! A long time 
      may have passed. Start a new timeslice... 
    */
+
+  
+
   gain(preempt);
+
 }
 
 
@@ -445,13 +487,14 @@ void gain(int preempt)
     int prev_exit = 0;
     Mutex_Lock(& prev->state_spinlock);
     prev->phase = CTX_CLEAN;
+    MFQ_state();
     switch(prev->state) 
     {
 
       case READY:
       if(prev->current_priority!=0){
       prev->current_priority=prev->current_priority-1;
-      fprintf(stderr, "Ready: current: %d, previous: %d\n",prev->current_priority, prev->current_priority-1);
+      //fprintf(stderr, "Ready: current: %d, previous: %d\n",prev->current_priority, prev->current_priority-1);
       }
         if(prev->type != IDLE_THREAD) sched_queue_add(prev);
         break;
@@ -463,7 +506,7 @@ void gain(int preempt)
       case STOPPED:
         if(prev->current_priority!=MAX_PRIORITY_LEVEL-1){
           prev->current_priority=prev->current_priority+1;
-          fprintf(stderr, "Stopped: current: %d, previous: %d\n",prev->current_priority, prev->current_priority+1);
+          //fprintf(stderr, "Stopped: current: %d, previous: %d\n",prev->current_priority, prev->current_priority+1);
         }
         break;
 
