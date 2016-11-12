@@ -1,4 +1,4 @@
-
+  
 #include <assert.h>
 #include <sys/mman.h>
 
@@ -6,6 +6,7 @@
 #include "kernel_cc.h"
 #include "kernel_sched.h"
 #include "kernel_proc.h"
+
 
 #ifndef NVALGRIND
 #include <valgrind/valgrind.h>
@@ -46,6 +47,16 @@
  */
 volatile unsigned int active_threads = 0;
 Mutex active_threads_spinlock = MUTEX_INIT;
+
+#define ANSI_COLOR_RED     "\x1b[31m"
+#define ANSI_COLOR_GREEN   "\x1b[32m"
+#define ANSI_COLOR_YELLOW  "\x1b[33m"
+#define ANSI_COLOR_BLUE    "\x1b[34m"
+#define ANSI_COLOR_MAGENTA "\x1b[35m"
+#define ANSI_COLOR_CYAN    "\x1b[36m"
+#define ANSI_COLOR_RESET   "\x1b[0m"
+
+#define MFQ_SHOW 0
 
 
 /* This is specific to Intel Pentium! */
@@ -138,20 +149,25 @@ static void thread_start()
   Initialize and return a new TCB
 */
 
-TCB* spawn_thread(PCB* pcb, void (*func)())
+TCB* spawn_thread(MTCB* mtcb, PCB* pcb, void (*func)())
 {
+
   /* The allocated thread size must be a multiple of page size */
   TCB* tcb = (TCB*) allocate_thread(THREAD_SIZE);
 
   /* Set the owner */
   tcb->owner_pcb = pcb;
-
+  tcb->mtcb_handler = mtcb;
   /* Initialize the other attributes */
   tcb->type = NORMAL_THREAD;
   tcb->state = INIT;
   tcb->phase = CTX_CLEAN;
   tcb->state_spinlock = MUTEX_INIT;
   tcb->thread_func = func;
+
+  tcb->initial_priority =10; //initial_priority = pcb->parent->main_thread->current_priority;  /* Make initial priority equal to parent's current priority */
+  tcb->current_priority =10; //current_priority = tcb->initial_priority;                       
+
   rlnode_init(& tcb->sched_node, tcb);  /* Intrusive list node */
 
 
@@ -175,6 +191,8 @@ TCB* spawn_thread(PCB* pcb, void (*func)())
   active_threads++;
   Mutex_Unlock(&active_threads_spinlock);
  
+
+
   return tcb;
 }
 
@@ -211,6 +229,11 @@ void release_TCB(TCB* tcb)
 /* Core control blocks */
 CCB cctx[MAX_CORES];
 
+/* The number of scheduler table possitions */
+#define MAX_PRIORITY_LEVEL 15
+
+/* Scheduler table */
+rlnode scheduler_table[MAX_PRIORITY_LEVEL];
 
 /*
   The scheduler queue is implemented as a doubly linked list. The
@@ -241,9 +264,10 @@ void ici_handler()
 */
 void sched_queue_add(TCB* tcb)
 {
+
   /* Insert at the end of the scheduling list */
   Mutex_Lock(& sched_spinlock);
-  rlist_push_back(& SCHED, & tcb->sched_node);
+  rlist_push_back(&scheduler_table[tcb->current_priority], & tcb->sched_node);
   Mutex_Unlock(& sched_spinlock);
 
   /* Restart possibly halted cores */
@@ -258,12 +282,51 @@ void sched_queue_add(TCB* tcb)
 TCB* sched_queue_select()
 {
   Mutex_Lock(& sched_spinlock);
-  rlnode * sel = rlist_pop_front(& SCHED);
+  //puts("rloist pop");
+  rlnode * sel = rlist_pop_front(&scheduler_table[sched_max_available()]);
   Mutex_Unlock(& sched_spinlock);
+  
 
   return sel->tcb;  /* When the list is empty, this is NULL */
 } 
 
+
+unsigned int sched_max_available()
+{
+  
+  
+  for(unsigned int i = MAX_PRIORITY_LEVEL; i>0; i--)
+  {
+    //puts("before if");
+    if(rlist_len(&scheduler_table[i-1])>0){
+      //puts("before return i");
+      return i-1;
+    }
+  }
+  //puts("before return 0");
+  return 0;
+}
+
+
+void MFQ_state(){
+if(MFQ_SHOW){
+  fprintf(stderr, ANSI_COLOR_MAGENTA"+---------------+------------------+\n"ANSI_COLOR_RESET);
+  fprintf(stderr, ANSI_COLOR_MAGENTA"|"ANSI_COLOR_YELLOW "Priority Level "ANSI_COLOR_MAGENTA"|"ANSI_COLOR_YELLOW" Threads in Queue " ANSI_COLOR_MAGENTA"|\n"ANSI_COLOR_RESET);
+  fprintf(stderr, ANSI_COLOR_MAGENTA"+---------------+------------------+\n"ANSI_COLOR_RESET);
+
+  /**A loop to present the current state of the ml feedback queue*/
+  for(unsigned int i = MAX_PRIORITY_LEVEL; i>0; i--){
+  
+  if(rlist_len(&scheduler_table[i-1])>0){
+      fprintf(stderr,ANSI_COLOR_MAGENTA"|"ANSI_COLOR_RED "      %2d       "ANSI_COLOR_MAGENTA"|"ANSI_COLOR_RED"       [%2d]       " ANSI_COLOR_MAGENTA"|\n", i,rlist_len(&scheduler_table[i-1]));
+
+  }else{
+    fprintf(stderr,ANSI_COLOR_MAGENTA"|"ANSI_COLOR_YELLOW "      %2d       "ANSI_COLOR_MAGENTA"|"ANSI_COLOR_YELLOW"       [%2d]       " ANSI_COLOR_MAGENTA"|\n", i,rlist_len(&scheduler_table[i-1]));
+  }
+}
+fprintf(stderr, ANSI_COLOR_MAGENTA"+---------------+------------------+\n"ANSI_COLOR_RESET);
+}
+}
 
 /*
   Make the process ready. 
@@ -355,16 +418,21 @@ void yield()
       assert(0);  /* It should not be READY or EXITED ! */
   }
   Mutex_Unlock(& current->state_spinlock);
-
+  
+  //puts("12");
+  
   /* Get next */
   TCB* next = sched_queue_select();
-
+  //puts("23");
   /* Maybe there was nothing ready in the scheduler queue ? */
   if(next==NULL) {
-    if(current_ready)
+    if(current_ready){
       next = current;
-    else
+    }
+    else{
       next = & CURCORE.idle_thread;
+    //puts("else");
+    }
   }
 
   /* ok, link the current and next TCB, for the gain phase */
@@ -380,7 +448,11 @@ void yield()
   /* This is where we get after we are switched back on! A long time 
      may have passed. Start a new timeslice... 
    */
+
+  
+
   gain(preempt);
+
 }
 
 
@@ -407,20 +479,35 @@ void gain(int preempt)
   current->phase = CTX_DIRTY;
   Mutex_Unlock(& current->state_spinlock);
 
+  /*If we reach this point we have to decide in which queue will the previous 
+  thread will be added*/
+
   /* Take care of the previous thread */
   if(current != prev) {
     int prev_exit = 0;
     Mutex_Lock(& prev->state_spinlock);
     prev->phase = CTX_CLEAN;
+    MFQ_state();
     switch(prev->state) 
     {
+
       case READY:
+      if(prev->current_priority!=0){
+      prev->current_priority=prev->current_priority-1;
+      //fprintf(stderr, "Ready: current: %d, previous: %d\n",prev->current_priority, prev->current_priority-1);
+      }
         if(prev->type != IDLE_THREAD) sched_queue_add(prev);
         break;
+
       case EXITED:
         prev_exit = 1; /* We cannot release here, because of the mutex */
         break;
+
       case STOPPED:
+        if(prev->current_priority!=MAX_PRIORITY_LEVEL-1){
+          prev->current_priority=prev->current_priority+1;
+          //fprintf(stderr, "Stopped: current: %d, previous: %d\n",prev->current_priority, prev->current_priority+1);
+        }
         break;
 
       default:
@@ -433,6 +520,8 @@ void gain(int preempt)
 
   /* Reset preemption as needed */
   if(preempt) preempt_on;
+
+  
 
   /* Set a 1-quantum alarm */
   bios_set_timer(QUANTUM);
@@ -458,10 +547,13 @@ static void idle_thread()
 
 /*
   Initialize the scheduler queue
- */
+*/
 void initialize_scheduler()
 {
-  rlnode_init(&SCHED, NULL);
+  for(int i=0; i< MAX_PRIORITY_LEVEL;i++)
+  {
+    rlnode_init(&scheduler_table[i], NULL);
+  }
 }
 
 

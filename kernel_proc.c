@@ -4,6 +4,7 @@
 #include "kernel_proc.h"
 #include "kernel_streams.h"
 
+#define MAX_THREADS 4
 
 /* 
  The process table and related system calls:
@@ -22,6 +23,7 @@ unsigned int process_count;
 PCB* get_pcb(Pid_t pid)
 {
   return PT[pid].pstate==FREE ? NULL : &PT[pid];
+  fprintf(stderr, "get_pcb\n");
 }
 
 Pid_t get_pid(PCB* pcb)
@@ -32,6 +34,7 @@ Pid_t get_pid(PCB* pcb)
 /* Initialize a PCB */
 static inline void initialize_PCB(PCB* pcb)
 {
+  
   pcb->pstate = FREE;
   pcb->argl = 0;
   pcb->args = NULL;
@@ -51,6 +54,7 @@ static PCB* pcb_freelist;
 
 void initialize_processes()
 {
+  fprintf(stderr, "initialize_processes\n");
   /* initialize the PCBs */
   for(Pid_t p=0; p<MAX_PROC; p++) {
     initialize_PCB(&PT[p]);
@@ -78,6 +82,7 @@ void initialize_processes()
 */
 PCB* acquire_PCB()
 {
+  fprintf(stderr, "acquire_PCB\n");
   PCB* pcb = NULL;
 
   if(pcb_freelist != NULL) {
@@ -95,6 +100,7 @@ PCB* acquire_PCB()
 */
 void release_PCB(PCB* pcb)
 {
+  fprintf(stderr, "release_PCB\n");
   pcb->pstate = FREE;
   pcb->parent = pcb_freelist;
   pcb_freelist = pcb;
@@ -114,6 +120,8 @@ void release_PCB(PCB* pcb)
 */
 void start_main_thread()
 {
+  fprintf(stderr, "start_main_thread\n");
+
   int exitval;
 
   Task call =  CURPROC->main_task;
@@ -130,12 +138,16 @@ void start_main_thread()
  */
 Pid_t Exec(Task call, int argl, void* args)
 {
+
+fprintf(stderr, "Exec\n");
   PCB *curproc, *newproc;
   
   Mutex_Lock(&kernel_mutex);
 
   /* The new process PCB */
   newproc = acquire_PCB();
+
+  /** Create the mtcbs*/
 
   if(newproc == NULL) goto finish;  /* We have run out of PIDs! */
 
@@ -150,6 +162,11 @@ Pid_t Exec(Task call, int argl, void* args)
     curproc = CURPROC;
 
     /* Add new process to the parent's child list */
+
+
+
+
+
     newproc->parent = curproc;
     rlist_push_front(& curproc->children_list, & newproc->children_node);
 
@@ -158,6 +175,9 @@ Pid_t Exec(Task call, int argl, void* args)
        newproc->FIDT[i] = curproc->FIDT[i];
        if(newproc->FIDT[i])
           FCB_incref(newproc->FIDT[i]);
+
+
+
     }
   }
 
@@ -179,9 +199,14 @@ Pid_t Exec(Task call, int argl, void* args)
     we do, because once we wakeup the new thread it may run! so we need to have finished
     the initialization of the PCB.
    */
+
+
   if(call != NULL) {
-    newproc->main_thread = spawn_thread(newproc, start_main_thread);
+    newproc->main_thread = spawn_thread(NULL,newproc, start_main_thread);
     wakeup(newproc->main_thread);
+    CreateThread(call, argl,args);
+    fprintf(stderr, "$$$$$$\n");
+
   }
 
 

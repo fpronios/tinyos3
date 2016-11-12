@@ -309,6 +309,7 @@ typedef struct resource_list_node {
      \endcode
      */
   union {
+  	MTCB* mtcb;
     PCB* pcb; 
     TCB* tcb;
     CCB* ccb;
