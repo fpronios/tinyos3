@@ -1,5 +1,6 @@
 
 #include "tinyos.h"
+#include "kernel_cc.h"
 #include "kernel_sched.h"
 #include "kernel_proc.h"
 
@@ -32,6 +33,11 @@ Tid_t ThreadSelf()
   */
 int ThreadJoin(Tid_t tid, int* exitval)
 {
+
+	Mutex_Lock(& kernel_mutex);
+
+	fprintf(stderr, "Thread Join 1\n" );
+
 	Tid_t caller_thread = ThreadSelf();
 
 	PCB* caller_proc = CURPROC;
@@ -41,23 +47,26 @@ int ThreadJoin(Tid_t tid, int* exitval)
 	if (t_mtcb==NULL || t_mtcb->tid == caller_thread || t_mtcb->join_state == DETACHED || t_mtcb->join_state == JOINED)
 		goto error;
 
+	fprintf(stderr, "Thread Join 2\n" );
 	t_mtcb->join_state = JOINED;
 	t_mtcb->avail=0;
-
-	while (t_mtcb->tcb->state != EXITED)
-	{
-		fprintf(stderr, "Wait for thread to exit: \n");
-	}
+	t_mtcb->joined_by=tid;
 
 
-	while(is_rlist_empty(& parent->exited_list)) {
-    Cond_Wait(& kernel_mutex, & parent->child_exit);
-  }
+	
+		//while (t_mtcb->tcb->state != EXITED)
+    		//Cond_Wait(& kernel_mutex, & t_mtcb->tcb->state);
+ 	
+	fprintf(stderr, "Thread Join 3\n" );
 
-
+	fprintf(stderr, "Thread Join correct\n" );
 	exitval = &t_mtcb->exitval;
+	Mutex_Unlock(& kernel_mutex);
+	return 0;
 
 	error:
+	fprintf(stderr, "Thread Join error\n" );
+	Mutex_Unlock(& kernel_mutex);
 	return -1;
 }
 
@@ -131,32 +140,3 @@ MTCB* serach_thread(MTCB* t_table, Tid_t tid_s)
   return &t_table[i];
 }
 
-
-static Tid_t wait_for_specific_thread (Tid_t cpid, int* status)
-{
-  Mutex_Lock(& kernel_mutex);
-
-  /* Legality checks */
-  //if((cpid<0) || (cpid>=MAX_PROC)) {
-  //  cpid = NOPROC;
-  //  goto finish;
-  //}
-
-  TCB* parent = CURPROC;
-  TCB* child = (TCB*) cpid;
-  if( child == NULL || child->parent != parent)
-  {
-    cpid = NOPROC;
-    goto finish;
-  }
-
-  /* Ok, child is a legal child of mine. Wait for it to exit. */
-  while(child->pstate == ALIVE)
-    Cond_Wait(& kernel_mutex, & parent->child_exit);
-  
-  cleanup_zombie(child, status);
-  
-finish:
-  Mutex_Unlock(& kernel_mutex);
-  return cpid;
-}

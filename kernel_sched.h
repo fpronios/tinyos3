@@ -79,7 +79,7 @@ typedef struct multi_thread_control_block
 {
   TCB* tcb;
   Task task;
-  Tid_t tid;
+  Tid_t tid,joined_by;
 
   Task thread_task;         /**< The main thread's function */
   int argl;               /**< The main thread's argument length */
