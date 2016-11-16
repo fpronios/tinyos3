@@ -3,61 +3,20 @@
 #include "kernel_sched.h"
 #include "kernel_proc.h"
 
-void start_thread()
-{
-  //fprintf(stderr, "start_main_thread\n");
-
-  int exitval;
-
-  Task call =  CURPROC->main_task;
-  int argl = CURPROC->argl;
-  void* args = CURPROC->args;
-
-  exitval = call(argl,args);
-  Exit(exitval);
-}
-
 /** 
   @brief Create a new thread in the current process.
   */
 Tid_t CreateThread(Task task, int argl, void* args)
 {
-  MTCB* mtcb_loc = (MTCB*)malloc(sizeof(MTCB));
+  fprintf(stderr, "CreateThread 1st\n");
 
-  //mtcb_loc->
-  
-  //PCB *curproc, *newproc;
+  Tid_t ret = Exec_thread(task, argl, args);
 
-    mtcb_loc->owner_pcb = CURPROC;
-    
-
-    
-    mtcb_loc->pid=get_pid(CURPROC);
-    mtcb_loc->t_interrupt= NOT_INTERRUPTED;
-    mtcb_loc->join_state = JOINABLE;
-    
-    mtcb_loc->handled_tcb = CURPROC->main_thread;
-    mtcb_loc->args = args; 
-    mtcb_loc->argl = argl;
-
-    //rlnode_init(& CURPROC->mtcb_list, mtcb_loc);  /* Intrusive list node */
-
-    rlist_push_front(& CURPROC->mtcb_list, mtcb_loc);
-
-    printf("################ %d\n", mtcb_loc->pid);
-
-	
-  mtcb_loc->handled_tcb = spawn_thread(NULL, mtcb_loc->owner_pcb, start_thread);
-  
-return mtcb_loc->handled_tcb;
-
-  if (mtcb_loc->owner_pcb != NULL){
-    //wakeup(newproc->main_thread);
-    return mtcb_loc->handled_tcb;
+  if (ret==NOTHREAD){
+	return NOTHREAD;
   }else{
-    return NOTHREAD;
+    return ret;
   }
-
 }
 
 /**
@@ -73,6 +32,32 @@ Tid_t ThreadSelf()
   */
 int ThreadJoin(Tid_t tid, int* exitval)
 {
+	Tid_t caller_thread = ThreadSelf();
+
+	PCB* caller_proc = CURPROC;
+
+	MTCB* t_mtcb = serach_thread(caller_proc->mtcb_table,tid);/**Check if the given tid is valid and it belongs to the same process*/
+
+	if (t_mtcb==NULL || t_mtcb->tid == caller_thread || t_mtcb->join_state == DETACHED || t_mtcb->join_state == JOINED)
+		goto error;
+
+	t_mtcb->join_state = JOINED;
+	t_mtcb->avail=0;
+
+	while (t_mtcb->tcb->state != EXITED)
+	{
+		fprintf(stderr, "Wait for thread to exit: \n");
+	}
+
+
+	while(is_rlist_empty(& parent->exited_list)) {
+    Cond_Wait(& kernel_mutex, & parent->child_exit);
+  }
+
+
+	exitval = &t_mtcb->exitval;
+
+	error:
 	return -1;
 }
 
@@ -126,5 +111,52 @@ void ThreadClearInterrupt()
 
 
 
+MTCB* serach_thread(MTCB* t_table, Tid_t tid_s)
+{
+  int i;
+
+  MTCB* s_table;
+
+  for(i=0;i<MAX_PTHREADS;i++){
+  	s_table=&t_table[i];
+  	fprintf(stderr, "Looking for(tid): %li  , found(tid): %li\n",tid_s,s_table->tid );
+    if(t_table[i].tid == tid_s)
+      goto send;
+  }
+  fprintf(stderr, "No thread found!!\n");
+  return NULL;
+
+  send:
+  fprintf(stderr, "Thread found on pos: %d\n", i);
+  return &t_table[i];
+}
 
 
+static Tid_t wait_for_specific_thread (Tid_t cpid, int* status)
+{
+  Mutex_Lock(& kernel_mutex);
+
+  /* Legality checks */
+  //if((cpid<0) || (cpid>=MAX_PROC)) {
+  //  cpid = NOPROC;
+  //  goto finish;
+  //}
+
+  TCB* parent = CURPROC;
+  TCB* child = (TCB*) cpid;
+  if( child == NULL || child->parent != parent)
+  {
+    cpid = NOPROC;
+    goto finish;
+  }
+
+  /* Ok, child is a legal child of mine. Wait for it to exit. */
+  while(child->pstate == ALIVE)
+    Cond_Wait(& kernel_mutex, & parent->child_exit);
+  
+  cleanup_zombie(child, status);
+  
+finish:
+  Mutex_Unlock(& kernel_mutex);
+  return cpid;
+}

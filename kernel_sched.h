@@ -1,4 +1,5 @@
 /*
+ *
  *  Scheduler API and implementation 
  *
  */
@@ -63,31 +64,36 @@ typedef enum {
 } Thread_type;
 
 typedef enum {
-  JOINABLE,
-  JOINED,
-  DETACHED
-} Thread_join_state;
-
-typedef enum
-{
   INTERRUPTED,
   NOT_INTERRUPTED
-} Thread_interrupt; 
+} Thread_interrupt;
 
-/** The multi thread control block*/
-typedef struct multi_thread_control_block{
+typedef enum {
+  JOINABLE,
+  JOINED, 
+  DETACHED,
+  SOMETHING_ELSE
+} Thread_join_state;
 
-PCB* owner_pcb;       /**< This is null for a free TCB */
-TCB* handled_tcb;
-Pid_t pid;
-Thread_interrupt t_interrupt;
-Thread_join_state join_state;
+typedef struct multi_thread_control_block
+{
+  TCB* tcb;
+  Task task;
+  Tid_t tid;
 
+  Task thread_task;         /**< The main thread's function */
+  int argl;               /**< The main thread's argument length */
+  void* args; 
+  
+  int exitval; 
 
-int argl;               
-void* args; 
+  Thread_join_state join_state;
+  Thread_interrupt interrupt_state;
 
-}MTCB;
+  rlnode mtcb_node;
+  unsigned int avail;
+} MTCB;
+
 
 /**
   @brief The thread control block
@@ -98,16 +104,29 @@ void* args;
 typedef struct thread_control_block
 {
   PCB* owner_pcb;       /**< This is null for a free TCB */
-  MTCB* mtcb_handler;
+  MTCB* owner_mtcb;
+  /* Holds the number of yiled calls when this thread was selected for last time */
+  unsigned int threadSelection; /**< Variable used to prevent thread's starvation >**/
+
+  unsigned int io_bound;  /**< Variabe to keep track of the times one thread has call yield() 
+                               because it waits for IO. Bigger the value of this variable, 
+                               more io-bound the thread is>**/
+
+  unsigned int cpu_bound;  /**< Variabe to keep track of the times one thread has 
+                               complete its quantum and not been interrupted. Bigger 
+                               the value of this variable, more cpu-bound the thread is>**/
+
+  unsigned int priority;  /**< Current process priority >**/
+
+  unsigned int init_priority;  /**< Initial process priority (Priority cannot 
+                                    cross this barrier - lowest possible 
+                                    priority for this process) >**/
 
   ucontext_t context;     /**< The thread context */
 
-  unsigned int current_priority;
-  unsigned int initial_priority;
-
-#ifndef NVALGRIND
-  unsigned valgrind_stack_id; /**< This is useful in order to register the thread stack to valgrind */
-#endif
+  #ifndef NVALGRIND
+    unsigned valgrind_stack_id; /**< This is useful in order to register the thread stack to valgrind */
+  #endif
 
   Thread_type type;       /**< The type of thread */
   Thread_state state;    /**< The state of the thread */
@@ -184,7 +203,8 @@ extern CCB cctx[MAX_CORES];
   Note that, the new thread is returned in the @c INIT state.
   The caller must use @c wakeup() to start it.
 */
-TCB* spawn_thread(MTCB* mtcb, PCB* pcb, void (*func)());
+TCB* spawn_thread(PCB* pcb, void (*func)());
+
 
 /**
   @brief Wakeup a blocked thread.
@@ -195,6 +215,10 @@ TCB* spawn_thread(MTCB* mtcb, PCB* pcb, void (*func)());
   @param tcb the thread to be made @c READY.
 */
 void wakeup(TCB* tcb);
+
+
+/*  */
+void starvationCheck(void);
 
 
 /** 
@@ -226,8 +250,7 @@ void sleep_releasing(Thread_state newstate, Mutex* mx);
   and possibly switch to a different thread. The scheduler may decide that 
   it will renew the quantum for the current thread.
  */
-void yield(void);
-
+void yield(/*unsigned int yieldReason*/void);
 
 /*
 *
@@ -235,10 +258,6 @@ void yield(void);
 * 
 */
 unsigned int sched_max_available();
-
-
-void MFQ_state();
-
 
 /**
   @brief Enter the scheduler.
