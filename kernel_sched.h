@@ -62,6 +62,13 @@ typedef enum {
   NORMAL_THREAD   /**< Marks a normal thread */
 } Thread_type;
 
+/** Joined State*/
+typedef enum {
+  JOINABLE,
+  JOINED,
+  DETACHED
+} Thread_join_state;
+
 /**
   @brief The thread control block
 
@@ -71,6 +78,13 @@ typedef enum {
 typedef struct thread_control_block
 {
   PCB* owner_pcb;       /**< This is null for a free TCB */
+
+  
+  Thread_join_state join_state;
+
+  unsigned int initial_priority;  /** Starting process priority */
+
+  unsigned int current_priority;  /** Current process priority */
 
   ucontext_t context;     /**< The thread context */
 
@@ -196,6 +210,13 @@ void sleep_releasing(Thread_state newstate, Mutex* mx);
   it will renew the quantum for the current thread.
  */
 void yield(void);
+
+/*
+*
+* Function to find the queue to find the queue with the highest priority which is not empty. 
+* 
+*/
+unsigned int sched_max_available();
 
 /**
   @brief Enter the scheduler.

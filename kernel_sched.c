@@ -1,4 +1,4 @@
-
+  
 #include <assert.h>
 #include <sys/mman.h>
 
@@ -46,7 +46,6 @@
  */
 volatile unsigned int active_threads = 0;
 Mutex active_threads_spinlock = MUTEX_INIT;
-
 
 /* This is specific to Intel Pentium! */
 #define SYSTEM_PAGE_SIZE  (1<<12)
@@ -152,6 +151,10 @@ TCB* spawn_thread(PCB* pcb, void (*func)())
   tcb->phase = CTX_CLEAN;
   tcb->state_spinlock = MUTEX_INIT;
   tcb->thread_func = func;
+
+  tcb->initial_priority =10; //initial_priority = pcb->parent->main_thread->current_priority;  /* Make initial priority equal to parent's current priority */
+  tcb->current_priority =10; //current_priority = tcb->initial_priority;                       
+
   rlnode_init(& tcb->sched_node, tcb);  /* Intrusive list node */
 
 
@@ -211,6 +214,11 @@ void release_TCB(TCB* tcb)
 /* Core control blocks */
 CCB cctx[MAX_CORES];
 
+/* The number of scheduler table possitions */
+#define MAX_PRIORITY_LEVEL 15
+
+/* Scheduler table */
+rlnode scheduler_table[MAX_PRIORITY_LEVEL];
 
 /*
   The scheduler queue is implemented as a doubly linked list. The
@@ -243,7 +251,7 @@ void sched_queue_add(TCB* tcb)
 {
   /* Insert at the end of the scheduling list */
   Mutex_Lock(& sched_spinlock);
-  rlist_push_back(& SCHED, & tcb->sched_node);
+  rlist_push_back(&scheduler_table[tcb->current_priority], & tcb->sched_node);
   Mutex_Unlock(& sched_spinlock);
 
   /* Restart possibly halted cores */
@@ -258,12 +266,29 @@ void sched_queue_add(TCB* tcb)
 TCB* sched_queue_select()
 {
   Mutex_Lock(& sched_spinlock);
-  rlnode * sel = rlist_pop_front(& SCHED);
+  //puts("rloist pop");
+  rlnode * sel = rlist_pop_front(&scheduler_table[sched_max_available()]);
   Mutex_Unlock(& sched_spinlock);
+  
 
   return sel->tcb;  /* When the list is empty, this is NULL */
 } 
 
+
+unsigned int sched_max_available()
+{
+  
+  for(unsigned int i = MAX_PRIORITY_LEVEL; i>0; i--)
+  {
+    //puts("before if");
+    if(rlist_len(&scheduler_table[i-1])>0){
+      //puts("before return i");
+      return i-1;
+    }
+  }
+  //puts("before return 0");
+  return 0;
+}
 
 /*
   Make the process ready. 
@@ -355,16 +380,21 @@ void yield()
       assert(0);  /* It should not be READY or EXITED ! */
   }
   Mutex_Unlock(& current->state_spinlock);
-
+  
+  //puts("12");
+  
   /* Get next */
   TCB* next = sched_queue_select();
-
+  //puts("23");
   /* Maybe there was nothing ready in the scheduler queue ? */
   if(next==NULL) {
-    if(current_ready)
+    if(current_ready){
       next = current;
-    else
+    }
+    else{
       next = & CURCORE.idle_thread;
+    //puts("else");
+    }
   }
 
   /* ok, link the current and next TCB, for the gain phase */
@@ -407,6 +437,9 @@ void gain(int preempt)
   current->phase = CTX_DIRTY;
   Mutex_Unlock(& current->state_spinlock);
 
+  /*If we reach this point we have to decide in which queue will the previous 
+  thread will be added*/
+
   /* Take care of the previous thread */
   if(current != prev) {
     int prev_exit = 0;
@@ -414,13 +447,26 @@ void gain(int preempt)
     prev->phase = CTX_CLEAN;
     switch(prev->state) 
     {
+
       case READY:
+      if(prev->current_priority!=0){
+      prev->current_priority=prev->current_priority-1;
+      //fprintf(stderr, "Ready: current: %d, previous: %d\n",prev->current_priority, prev->current_priority-1);
+      }
         if(prev->type != IDLE_THREAD) sched_queue_add(prev);
         break;
+
       case EXITED:
         prev_exit = 1; /* We cannot release here, because of the mutex */
         break;
+
       case STOPPED:
+        if(prev->current_priority!=MAX_PRIORITY_LEVEL-1){
+          if(preempt){
+            prev->current_priority=prev->current_priority+1;
+          }
+            //fprintf(stderr, "Stopped: current: [%d], previous: [%d]\n",prev->current_priority, prev->current_priority+1);
+        }
         break;
 
       default:
@@ -433,6 +479,8 @@ void gain(int preempt)
 
   /* Reset preemption as needed */
   if(preempt) preempt_on;
+
+  
 
   /* Set a 1-quantum alarm */
   bios_set_timer(QUANTUM);
@@ -458,10 +506,13 @@ static void idle_thread()
 
 /*
   Initialize the scheduler queue
- */
+*/
 void initialize_scheduler()
 {
-  rlnode_init(&SCHED, NULL);
+  for(int i=0; i< MAX_PRIORITY_LEVEL;i++)
+  {
+    rlnode_init(&scheduler_table[i], NULL);
+  }
 }
 
 
