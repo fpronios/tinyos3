@@ -115,7 +115,7 @@ MTCB* return_avail_mtcb (Pid_t proc);
 
 MTCB* serach_thread(MTCB* t_table, Tid_t tid_s);
 
-
+//static inline rlnode* rlist_find_tid(rlnode* List, Tid_t tid);
 
 
 

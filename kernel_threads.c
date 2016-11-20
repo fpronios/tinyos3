@@ -25,6 +25,7 @@ MTCB *initMTCB() {
     
     MTCB_loc->join_state = JOINABLE;
     MTCB_loc->interrupt_state= NOT_INTERRUPTED;
+    MTCB_loc->exit_state=NOT_EXITED;
     rlnode_new(&MTCB_loc->mtcb_node);
     MTCB_loc->thread_exit = COND_INIT;
 
@@ -95,6 +96,27 @@ Tid_t ThreadSelf()
 }
 
 
+static inline rlnode* rlist_find_tid(rlnode* List, Tid_t tid)
+{
+  fprintf(stderr, "rlist_find_tid\n" );
+  rlnode* i= List->next;
+  while(i!=List) {
+    if(i->mtcb->tid == tid){
+      return i;
+    }
+    else
+    {
+      i = i->next;
+      if(i==NULL)
+        goto null_ret;
+    }
+
+  }
+  null_ret:
+  return NULL;
+}
+
+
 
 void onDestroy(MTCB *mtcb) {//Free mem used by PTCB
     rlist_remove(&mtcb->mtcb_node);
@@ -139,7 +161,7 @@ int ThreadJoin(Tid_t tid, int* exitval)
 
     new_mtcb->alive_threads++;
 
-    while (new_mtcb->join_state!=DETACHED) //&& !new_mtcb->has_exitted) {//Standard procedure.
+    while (new_mtcb->join_state!=DETACHED && new_mtcb->exit_state!=HAS_EXITED) //Standard procedure.
     {
         Cond_Wait(&kernel_mutex, &wait_thread.cv);
       
@@ -165,12 +187,25 @@ int ThreadJoin(Tid_t tid, int* exitval)
     return ret;
 }
 
+
 /**
   @brief Detach the given thread.
   */
 int ThreadDetach(Tid_t tid)
 {
-	return -1;
+	Mutex_Lock(&kernel_mutex);
+    int ret = -1;
+
+    rlnode *node = rlist_find_tid(&CURPROC->mtcb_list, tid);
+
+    if (node != NULL && node->mtcb->exit_state!=HAS_EXITED) {
+        node->mtcb->join_state = DETACHED;
+        ret = 0;
+    }
+
+    Mutex_Unlock(&kernel_mutex);
+    return ret;
+
 }
 
 
@@ -200,7 +235,9 @@ void ThreadExit(int exitval)
     TCB *tcb = (TCB *) ThreadSelf();
     MTCB* mtcb = tcb->owner_mtcb;
     mtcb->exitval = exitval;
+
     signal_cv(&mtcb->mtcb_node);
+
     CURPROC->alive_threads--;
 
     sleep_releasing(EXITED, &kernel_mutex);
@@ -229,7 +266,13 @@ int ThreadInterrupt(Tid_t tid)
   */
 int ThreadIsInterrupted()
 {
-	return 0;
+  Mutex_Lock(&kernel_mutex);
+  if(CURTHREAD->owner_mtcb->interrupt_state == NOT_INTERRUPTED)
+    return 0;
+  else
+    return 1;
+
+  Mutex_Unlock(&kernel_mutex);
 }
 
 /**
@@ -238,6 +281,9 @@ int ThreadIsInterrupted()
   */
 void ThreadClearInterrupt()
 {
+    Mutex_Lock(&kernel_mutex);
+    CURTHREAD->owner_mtcb->interrupt_state == NOT_INTERRUPTED;
+    Mutex_Unlock(&kernel_mutex);
 
 }
 
@@ -248,22 +294,4 @@ A method to find the mtcb containing yje given tid
 
 */
 
-static inline rlnode* rlist_find_tid(rlnode* List, Tid_t tid)
-{
-  fprintf(stderr, "rlist_find_tid\n" );
-  rlnode* i= List->next;
-  while(i!=List) {
-    if(i->mtcb->tid == tid){
-      return i;
-    }
-    else
-    {
-      i = i->next;
-      if(i==NULL)
-        goto null_ret;
-    }
 
-  }
-  null_ret:
-  return NULL;
-}

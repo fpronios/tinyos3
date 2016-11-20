@@ -75,6 +75,11 @@ typedef enum {
   SOMETHING_ELSE
 } Thread_join_state;
 
+typedef enum {
+  HAS_EXITED,
+  NOT_EXITED
+} Thread_exit_state;
+
 typedef struct multi_thread_control_block
 {
   TCB* tcb;
@@ -89,8 +94,11 @@ typedef struct multi_thread_control_block
 
   Thread_CondVar wait_thread;
 
+  
   Thread_join_state join_state;
   Thread_interrupt interrupt_state;
+
+  Thread_exit_state exit_state;
 
   rlnode mtcb_node;
   unsigned int avail;

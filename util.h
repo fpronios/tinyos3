@@ -320,6 +320,7 @@ typedef struct resource_list_node {
     intptr_t num;
     uintptr_t unum;
   };
+  
 
   /* list pointers */
   rlnode_ptr prev;  /**< @brief Pointer to previous node */
