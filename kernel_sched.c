@@ -1,4 +1,4 @@
-  
+
 #include <assert.h>
 #include <sys/mman.h>
 
@@ -6,7 +6,6 @@
 #include "kernel_cc.h"
 #include "kernel_sched.h"
 #include "kernel_proc.h"
-
 
 #ifndef NVALGRIND
 #include <valgrind/valgrind.h>
@@ -21,7 +20,7 @@
   can allocate the TCB at the top of the memory block used as the stack.
 
   +-------------+
-  |   TCB       |
+  |     TCB     |
   +-------------+
   |             |
   |    stack    |
@@ -38,16 +37,24 @@
 
   Disadvantages: The stack cannot grow unless we move the whole TCB. Of course,
   we do not support stack growth anyway!
- */
+*/
 
 
 /* 
   A counter for active threads. By "active", we mean 'existing', 
   with the exception of idle threads (they don't count).
- */
+*/
 volatile unsigned int active_threads = 0;
 Mutex active_threads_spinlock = MUTEX_INIT;
 
+/* This variabe hold the number of yield() calls */
+volatile unsigned int yieldCalls = 0;
+
+/*
+*
+* ANSI escape codes to colour the prnted output.
+*
+*/
 #define ANSI_COLOR_RED     "\x1b[31m"
 #define ANSI_COLOR_GREEN   "\x1b[32m"
 #define ANSI_COLOR_YELLOW  "\x1b[33m"
@@ -56,25 +63,53 @@ Mutex active_threads_spinlock = MUTEX_INIT;
 #define ANSI_COLOR_CYAN    "\x1b[36m"
 #define ANSI_COLOR_RESET   "\x1b[0m"
 
+
+/* 1 to enable the Sheduler list prnting, 0 to disable it. */
 #define MFQ_SHOW 0
 
+/* Flag to enable/disable the initial priority concept*/
+#define MLFQ_initPriority 0
 
+/* Initial priority of spawned threads */
+#define initialPriority 9
+
+/* The lowest number of yield calls that I will check for starving threads */
+#define lowest_starvationCheck 10
+
+/* 
+*  Each time a thread completes its quantum (without been interrupted) 
+*  for cpuBoundBarrier times its priority is reduced by 1.
+*/
+#define cpuBoundBarrier 7
+
+/*
+*
+*  Every 10 times the yield is called check all Ready threads.
+*  If you find threads that they have not been sellected for 
+*  (starvationBarrier * the number of Ready threads) times increase
+*  the priority of these threads by 1.
+*
+*/
+#define starvationBarrier 2
+ 
 /* This is specific to Intel Pentium! */
 #define SYSTEM_PAGE_SIZE  (1<<12)
+
 
 /* The memory allocated for the TCB must be a multiple of SYSTEM_PAGE_SIZE */
 #define THREAD_TCB_SIZE   (((sizeof(TCB)+SYSTEM_PAGE_SIZE-1)/SYSTEM_PAGE_SIZE)*SYSTEM_PAGE_SIZE)
 
+
 #define THREAD_SIZE  (THREAD_TCB_SIZE+THREAD_STACK_SIZE)
+
 
 //#define MMAPPED_THREAD_MEM 
 #ifdef MMAPPED_THREAD_MEM 
-
 /*
   Use mmap to allocate a thread. A more detailed implementation can allocate a
   "sentinel page", and change access to PROT_NONE, so that a stack overflow
   is detected as seg.fault.
- */
+*/
 void free_thread(void* ptr, size_t size)
 {
   CHECK(munmap(ptr, size));
@@ -95,7 +130,7 @@ void* allocate_thread(size_t size)
 /*
   Use malloc to allocate a thread. This is probably faster than  mmap, but cannot
   be made easily to 'detect' stack overflow.
- */
+*/
 void free_thread(void* ptr, size_t size)
 {
   free(ptr);
@@ -128,12 +163,11 @@ void initialize_context(ucontext_t* ctx, stack_t stack, void (*ctx_func)())
 }
 
 
-
 /*
   This is the function that is used to start normal threads.
 */
-
 void gain(int preempt); /* forward */
+
 
 static void thread_start()
 {
@@ -148,25 +182,37 @@ static void thread_start()
 /*
   Initialize and return a new TCB
 */
-
-TCB* spawn_thread(MTCB* mtcb, PCB* pcb, void (*func)())
+TCB* spawn_thread(PCB* pcb, void (*func)(), MTCB* mtcb)
 {
-
   /* The allocated thread size must be a multiple of page size */
   TCB* tcb = (TCB*) allocate_thread(THREAD_SIZE);
 
   /* Set the owner */
   tcb->owner_pcb = pcb;
-  tcb->mtcb_handler = mtcb;
+
   /* Initialize the other attributes */
   tcb->type = NORMAL_THREAD;
   tcb->state = INIT;
   tcb->phase = CTX_CLEAN;
   tcb->state_spinlock = MUTEX_INIT;
   tcb->thread_func = func;
+  tcb->cpu_bound = 0;
+  tcb->threadSelection = 0;
 
-  tcb->initial_priority =10; //initial_priority = pcb->parent->main_thread->current_priority;  /* Make initial priority equal to parent's current priority */
-  tcb->current_priority =10; //current_priority = tcb->initial_priority;                       
+
+  tcb->owner_mtcb=mtcb;
+
+  
+  if(get_pid(pcb)<=1) 
+  {
+    tcb->priority = initialPriority;
+    tcb->init_priority = initialPriority;
+  }
+  else
+  {
+    tcb->priority = pcb->parent->main_thread->priority;   /* Make initial priority equal to parent's current priority */
+    tcb->init_priority = tcb->priority;
+  }                      
 
   rlnode_init(& tcb->sched_node, tcb);  /* Intrusive list node */
 
@@ -181,25 +227,27 @@ TCB* spawn_thread(MTCB* mtcb, PCB* pcb, void (*func)())
   /* Init the context */
   initialize_context(& tcb->context, stack, thread_start);
 
-#ifndef NVALGRIND
-  tcb->valgrind_stack_id = 
-    VALGRIND_STACK_REGISTER(stack.ss_sp, stack.ss_sp+THREAD_STACK_SIZE);
-#endif
+  #ifndef NVALGRIND
+    tcb->valgrind_stack_id = 
+      VALGRIND_STACK_REGISTER(stack.ss_sp, stack.ss_sp+THREAD_STACK_SIZE);
+  #endif
 
   /* increase the count of active threads */
   Mutex_Lock(&active_threads_spinlock);
   active_threads++;
   Mutex_Unlock(&active_threads_spinlock);
- 
 
-
+  if(mtcb!=NULL){
+  mtcb->tcb = tcb;
+  mtcb->tid = (Tid_t)tcb;
+  } 
   return tcb;
 }
 
 
 /*
   This is called with tcb->state_spinlock locked !
- */
+*/
 void release_TCB(TCB* tcb)
 {
 #ifndef NVALGRIND
@@ -215,19 +263,20 @@ void release_TCB(TCB* tcb)
 
 
 /*
- *
- * Scheduler
- *
- */
+*
+* Scheduler
+*
+*/
 
 
 /*
- *  Note: the scheduler routines are all in the non-preemptive domain.
- */
+*  Note: the scheduler routines are all in the non-preemptive domain.
+*/
 
 
 /* Core control blocks */
 CCB cctx[MAX_CORES];
+
 
 /* The number of scheduler table possitions */
 #define MAX_PRIORITY_LEVEL 15
@@ -235,13 +284,7 @@ CCB cctx[MAX_CORES];
 /* Scheduler table */
 rlnode scheduler_table[MAX_PRIORITY_LEVEL];
 
-/*
-  The scheduler queue is implemented as a doubly linked list. The
-  head and tail of this list are stored in  SCHED.
-*/
 
-
-rlnode SCHED;                         /* The scheduler queue */
 Mutex sched_spinlock = MUTEX_INIT;    /* spinlock for scheduler queue */
 
 
@@ -250,6 +293,7 @@ void yield_handler()
 {
   yield();
 }
+
 
 /* Interrupt handle for inter-core interrupts */
 void ici_handler() 
@@ -264,14 +308,42 @@ void ici_handler()
 */
 void sched_queue_add(TCB* tcb)
 {
-
+  fprintf(stderr, "sched_queue_add start\n" );
   /* Insert at the end of the scheduling list */
   Mutex_Lock(& sched_spinlock);
-  rlist_push_back(&scheduler_table[tcb->current_priority], & tcb->sched_node);
+  rlist_push_back(&scheduler_table[tcb->priority], & tcb->sched_node);
   Mutex_Unlock(& sched_spinlock);
-
+fprintf(stderr, "sched_queue_add end\n" );
   /* Restart possibly halted cores */
   cpu_core_restart_one();
+}
+
+
+/*
+*  Function to print the Sheduler list with the number of Ready threads in every priority level. 
+*/
+void MFQ_state()
+{
+  if(MFQ_SHOW)
+  {
+    fprintf(stderr, ANSI_COLOR_MAGENTA"+---------------+------------------+\n"ANSI_COLOR_RESET);
+    fprintf(stderr, ANSI_COLOR_MAGENTA"|"ANSI_COLOR_YELLOW "Priority Level "ANSI_COLOR_MAGENTA"|"ANSI_COLOR_YELLOW" Threads in Queue " ANSI_COLOR_MAGENTA"|\n"ANSI_COLOR_RESET);
+    fprintf(stderr, ANSI_COLOR_MAGENTA"+---------------+------------------+\n"ANSI_COLOR_RESET);
+
+    /**A loop to present the current state of the ml feedback queue*/
+    for(unsigned int i = MAX_PRIORITY_LEVEL; i>0; i--)
+    {
+      if(rlist_len(&scheduler_table[i-1])>0)
+      {
+        fprintf(stderr,ANSI_COLOR_MAGENTA"|"ANSI_COLOR_RED "      %2u       "ANSI_COLOR_MAGENTA"|"ANSI_COLOR_RED"       [%2zu]       " ANSI_COLOR_MAGENTA"|\n", i,rlist_len(&scheduler_table[i-1]));
+      }
+      else
+      {
+        fprintf(stderr,ANSI_COLOR_MAGENTA"|"ANSI_COLOR_YELLOW "      %2u       "ANSI_COLOR_MAGENTA"|"ANSI_COLOR_YELLOW"       [%2zu]       " ANSI_COLOR_MAGENTA"|\n", i,rlist_len(&scheduler_table[i-1]));
+      }
+    }
+    fprintf(stderr, ANSI_COLOR_MAGENTA"+---------------+------------------+\n"ANSI_COLOR_RESET);
+  }
 }
 
 
@@ -282,50 +354,41 @@ void sched_queue_add(TCB* tcb)
 TCB* sched_queue_select()
 {
   Mutex_Lock(& sched_spinlock);
-  //puts("rloist pop");
-  rlnode * sel = rlist_pop_front(&scheduler_table[sched_max_available()]);
+  rlnode* sel = rlist_pop_front(&scheduler_table[sched_max_available()]);
   Mutex_Unlock(& sched_spinlock);
-  
-
-  return sel->tcb;  /* When the list is empty, this is NULL */
+ 
+  if(sel != NULL)
+    return sel->tcb;  /* When the list is empty, this is NULL */
+  else
+    return NULL;
 } 
 
 
+/*
+*  Function to find the highest priority level which is not empty.
+*/
 unsigned int sched_max_available()
 {
-  
-  
   for(unsigned int i = MAX_PRIORITY_LEVEL; i>0; i--)
   {
-    //puts("before if");
-    if(rlist_len(&scheduler_table[i-1])>0){
-      //puts("before return i");
+    if(rlist_len(&scheduler_table[i-1]))
       return i-1;
-    }
   }
-  //puts("before return 0");
   return 0;
 }
 
+/*
+*  Fuction to get the number of (Ready) threads in Scheduler list.
+*/
+unsigned int get_Ready_threads_number()
+{
+  unsigned int ready_threads=0;
 
-void MFQ_state(){
-if(MFQ_SHOW){
-  fprintf(stderr, ANSI_COLOR_MAGENTA "+---------------+------------------+\n"ANSI_COLOR_RESET);
-  fprintf(stderr, ANSI_COLOR_MAGENTA "|"ANSI_COLOR_YELLOW "Priority Level "ANSI_COLOR_MAGENTA"|" ANSI_COLOR_RESET ANSI_COLOR_YELLOW" Threads in Queue " ANSI_COLOR_MAGENTA"|\n"ANSI_COLOR_RESET);
-  fprintf(stderr, ANSI_COLOR_MAGENTA "+---------------+------------------+\n"ANSI_COLOR_RESET);
-
-  /**A loop to present the current state of the ml feedback queue*/
-  for(unsigned int i = MAX_PRIORITY_LEVEL; i>0; i--){
-  
-  if(rlist_len(&scheduler_table[i-1])>0){
-      fprintf(stderr,ANSI_COLOR_MAGENTA "|"ANSI_COLOR_RESET  ANSI_COLOR_RED "      %2d       "ANSI_COLOR_MAGENTA ANSI_COLOR_RESET"|"ANSI_COLOR_RED"       [%2d]       " ANSI_COLOR_MAGENTA"|\n"ANSI_COLOR_RESET, i,rlist_len(&scheduler_table[i-1]));
-
-  }else{
-    fprintf(stderr,ANSI_COLOR_MAGENTA "|" ANSI_COLOR_RESET ANSI_COLOR_YELLOW "      %2d       "ANSI_COLOR_MAGENTA ANSI_COLOR_RESET"|"ANSI_COLOR_YELLOW"       [%2d]       " ANSI_COLOR_MAGENTA"|\n"ANSI_COLOR_RESET, i,rlist_len(&scheduler_table[i-1]));
+  for(unsigned int i = MAX_PRIORITY_LEVEL; i>0; i--)
+  {
+      ready_threads += rlist_len(&scheduler_table[i-1]);
   }
-}
-fprintf(stderr, ANSI_COLOR_MAGENTA"+---------------+------------------+\n"ANSI_COLOR_RESET);
-}
+  return ready_threads;
 }
 
 /*
@@ -333,20 +396,27 @@ fprintf(stderr, ANSI_COLOR_MAGENTA"+---------------+------------------+\n"ANSI_C
  */
 void wakeup(TCB* tcb)
 {
+
   /* Preemption off */
   int oldpre = preempt_off;
 
   /* To touch tcb->state, we must get the spinlock. */
+
+  fprintf(stderr, "400\n" );
   Mutex_Lock(& tcb->state_spinlock);
+ 
   assert(tcb->state==STOPPED || tcb->state==INIT); 
-
   tcb->state = READY;
-
+  fprintf(stderr, "405\n");
   /* Possibly add to the scheduler queue */
-  if(tcb->phase == CTX_CLEAN) 
-    sched_queue_add(tcb);
 
-  Mutex_Unlock(& tcb->state_spinlock);
+  if(tcb->phase == CTX_CLEAN) {
+    fprintf(stderr, "409\n");
+    sched_queue_add(tcb);
+    fprintf(stderr, "411\n");
+  }
+fprintf(stderr, "Shed queue add\n");
+ Mutex_Unlock(& tcb->state_spinlock);
 
   /* Restore preemption state */
   if(oldpre) preempt_on;
@@ -387,11 +457,13 @@ void sleep_releasing(Thread_state state, Mutex* mx)
 
 
 /* This function is the entry point to the scheduler's context switching */
-
-void yield()
+void yield(/*unsigned int yieldReason*/)
 { 
+
+  yieldCalls += 1;
+
   /* Reset the timer, so that we are not interrupted by ALARM */
-  bios_cancel_timer();
+  TimerDuration remainingTime = bios_cancel_timer();
 
   /* We must stop preemption but save it! */
   int preempt = preempt_off;
@@ -404,12 +476,54 @@ void yield()
   switch(current->state)
   {
     case RUNNING:
+
       current->state = READY;
+
+      if(remainingTime == 0)
+      { 
+        current->cpu_bound += 1; 
+
+        if(MLFQ_initPriority)
+        {
+          if((current->priority!=0) & (current->priority > current->init_priority))
+          {
+            current->priority -= 1;
+            /* IO bound thread giati & kai oxi &&? */
+            if((current->priority!=0) & (current->cpu_bound %cpuBoundBarrier == 0) & (current->priority > current->init_priority))
+            {
+              current->priority -= 1;
+            }
+          }
+        }
+        else
+        {
+          if(current->priority!=0)
+          {
+            current->priority -= 1;
+
+            /* IO bound thread */
+            if((current->priority!=0) & (current->cpu_bound %cpuBoundBarrier == 0)) 
+            {
+              current->priority -= 1;
+            }
+          }
+        }
+      }
+
     case READY: /* We were awakened before we managed to sleep! */
+      if(current->priority!=MAX_PRIORITY_LEVEL-1)
+      {
+        current->priority += 1;
+      }
       current_ready = 1;
       break;
 
     case STOPPED:
+      if(current->priority!=MAX_PRIORITY_LEVEL-1)
+        {
+          current->priority=current->priority+1;
+        }
+
     case EXITED:
       break; 
 
@@ -417,22 +531,24 @@ void yield()
       fprintf(stderr, "BAD STATE for current thread %p in yield: %d\n", current, current->state);
       assert(0);  /* It should not be READY or EXITED ! */
   }
+
+  if(yieldCalls%((active_threads>lowest_starvationCheck)?active_threads:lowest_starvationCheck) == 0)
+  {
+    starvationCheck(); 
+  }
+  
   Mutex_Unlock(& current->state_spinlock);
-  
-  //puts("12");
-  
+
   /* Get next */
   TCB* next = sched_queue_select();
-  //puts("23");
+
   /* Maybe there was nothing ready in the scheduler queue ? */
-  if(next==NULL) {
-    if(current_ready){
+  if(next==NULL) 
+  {
+    if(current_ready)
       next = current;
-    }
-    else{
+    else
       next = & CURCORE.idle_thread;
-    //puts("else");
-    }
   }
 
   /* ok, link the current and next TCB, for the gain phase */
@@ -440,7 +556,8 @@ void yield()
   next->prev = current;
 
   /* Switch contexts */
-  if(current!=next) {
+  if(current!=next) 
+  {
     CURTHREAD = next;
     swapcontext( & current->context , & next->context );
   }
@@ -448,11 +565,37 @@ void yield()
   /* This is where we get after we are switched back on! A long time 
      may have passed. Start a new timeslice... 
    */
-
-  
-
   gain(preempt);
+}
 
+
+/*
+*
+*  Check the all the Scheduler list for starving threads 
+*  and increases their priority by one.
+*
+*/
+void starvationCheck()
+{
+  for(unsigned int i=0; i < MAX_PRIORITY_LEVEL-1; i++)
+  {
+
+    unsigned int until = rlist_len(&scheduler_table[i]);
+
+    for(unsigned int j=0; j<until; j++)
+    {
+      rlnode* sel = rlist_pop_front(&scheduler_table[i]);
+      TCB* checkNode = sel->tcb;
+      
+      if(checkNode->threadSelection + starvationBarrier*get_Ready_threads_number() <= yieldCalls)
+      {
+        checkNode->priority += 1;
+        checkNode->threadSelection = yieldCalls;
+      }
+      //fprintf(stderr, "****************\n");
+      rlist_push_back(&scheduler_table[ checkNode->priority], &checkNode->sched_node);
+    }
+  }
 }
 
 
@@ -467,11 +610,12 @@ void yield()
   domain (e.g., waiting at some driver), we need not to turn preemption
   on!
 */
-
 void gain(int preempt)
 {
   TCB* current = CURTHREAD; 
   TCB* prev = current->prev;
+
+  MFQ_state();
 
   /* Mark current state */
   Mutex_Lock(& current->state_spinlock);
@@ -479,35 +623,21 @@ void gain(int preempt)
   current->phase = CTX_DIRTY;
   Mutex_Unlock(& current->state_spinlock);
 
-  /*If we reach this point we have to decide in which queue will the previous 
-  thread will be added*/
-
   /* Take care of the previous thread */
   if(current != prev) {
     int prev_exit = 0;
     Mutex_Lock(& prev->state_spinlock);
     prev->phase = CTX_CLEAN;
-    MFQ_state();
+    //MFQ_state();
     switch(prev->state) 
     {
-
       case READY:
-      if(prev->current_priority!=0){
-      prev->current_priority=prev->current_priority-1;
-      //fprintf(stderr, "Ready: current: %d, previous: %d\n",prev->current_priority, prev->current_priority-1);
-      }
         if(prev->type != IDLE_THREAD) sched_queue_add(prev);
         break;
-
       case EXITED:
         prev_exit = 1; /* We cannot release here, because of the mutex */
         break;
-
       case STOPPED:
-        if(prev->current_priority!=MAX_PRIORITY_LEVEL-1){
-          prev->current_priority=prev->current_priority+1;
-          //fprintf(stderr, "Stopped: current: %d, previous: %d\n",prev->current_priority, prev->current_priority+1);
-        }
         break;
 
       default:
@@ -521,7 +651,7 @@ void gain(int preempt)
   /* Reset preemption as needed */
   if(preempt) preempt_on;
 
-  
+  current->threadSelection = yieldCalls;
 
   /* Set a 1-quantum alarm */
   bios_set_timer(QUANTUM);
@@ -534,7 +664,8 @@ static void idle_thread()
   yield();
 
   /* We come here whenever we cannot find a ready thread for our core */
-  while(active_threads>0) {
+  while(active_threads>0) 
+  {
     cpu_core_halt();
     yield();
   }
@@ -550,7 +681,7 @@ static void idle_thread()
 */
 void initialize_scheduler()
 {
-  for(int i=0; i< MAX_PRIORITY_LEVEL;i++)
+  for(unsigned int i=0; i < MAX_PRIORITY_LEVEL; i++)
   {
     rlnode_init(&scheduler_table[i], NULL);
   }
@@ -587,5 +718,3 @@ void run_scheduler()
   cpu_interrupt_handler(ALARM, NULL);
   cpu_interrupt_handler(ICI, NULL);
 }
-
-

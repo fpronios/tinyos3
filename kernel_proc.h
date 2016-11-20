@@ -11,11 +11,15 @@
 
   This file defines the PCB structure and basic helpers for
   process access.
+
+  @{
 */ 
 
 #include "tinyos.h"
 #include "kernel_sched.h"
 
+
+#define MAX_PTHREADS 10
 /**
   @brief PID state
 
@@ -28,9 +32,6 @@ typedef enum pid_state_e {
   ZOMBIE  /**< The PID is held by a zombie */
 } pid_state;
 
-/** Joined State*/
-
-
 /**
   @brief Process Control Block.
 
@@ -39,15 +40,18 @@ typedef enum pid_state_e {
 typedef struct process_control_block {
   pid_state  pstate;      /**< The pid state for this PCB */
 
-  rlnode mtcb_list;
-
   PCB* parent;            /**< Parent's pcb. */
   int exitval;            /**< The exit value */
 
   TCB* main_thread;       /**< The main thread */
   Task main_task;         /**< The main thread's function */
+  Task thread_task;
   int argl;               /**< The main thread's argument length */
   void* args;             /**< The main thread's argument string */
+
+  rlnode mtcb_list;
+  //rlnode mtcb_node;
+  MTCB mtcb_table[MAX_PTHREADS];
 
   rlnode children_list;   /**< List of children */
   rlnode exited_list;     /**< List of exited children */
@@ -57,6 +61,9 @@ typedef struct process_control_block {
   CondVar child_exit;     /**< Condition variable for @c WaitChild */
 
   FCB* FIDT[MAX_FILEID];  /**< The fileid table of the process */
+
+  MTCB* temp;
+  unsigned int alive_threads;
 
 } PCB;
 
@@ -93,7 +100,26 @@ PCB* get_pcb(Pid_t pid);
 */
 Pid_t get_pid(PCB* pcb);
 
-//void start_main_thread();
+/** @} */
+
+
+void init_mtcb_table(Pid_t proc);
+
+Tid_t Exec_thread (Task call, int argl, void* args);
+
+Tid_t mtcb_insert(MTCB* mtcb, Pid_t proc);
+
+void print_mtcb(Pid_t proc);
+
+MTCB* return_avail_mtcb (Pid_t proc);
+
+MTCB* serach_thread(MTCB* t_table, Tid_t tid_s);
+
+
+
+
+
+
 
 
 
